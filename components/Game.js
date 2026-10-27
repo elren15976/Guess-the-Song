@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-// Clip length at each level (seconds) and the points a correct guess earns at that level.
+// Clip length at each level (seconds).
 const LEVELS = [0.5, 1, 2, 5, 10];
-const POINTS = [5, 4, 3, 2, 1];
+// Seconds of fade-in when playing the song after the reveal.
+const REVEAL_FADE_IN = 2.5;
 const RING_RADII = [20, 36, 52, 68, 84];
 
 const shuffle = (arr) => {
@@ -30,7 +31,6 @@ export default function Game() {
   const [idx, setIdx] = useState(0);
   const [level, setLevel] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  const [winner, setWinner] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | loading | playing | error
 
   const ctxRef = useRef(null);
@@ -97,10 +97,16 @@ export default function Game() {
       if (offsetRef.current === null) {
         offsetRef.current = randomStart ? Math.random() * Math.max(0, buf.duration - LEVELS[4] - 1) : 0;
       }
-      const offset = offsetRef.current;
+      // Question clips use the song's start point; the reveal playback jumps to song.reveal.
+      const offset = full ? Math.min(song.reveal || 0, Math.max(0, buf.duration - 1)) : offsetRef.current;
       const dur = full ? Math.max(0.1, buf.duration - offset) : Math.min(LEVELS[lv], buf.duration - offset);
       const gain = ctx.createGain();
       const t = ctx.currentTime;
+      if (full) {
+        const fade = Math.min(REVEAL_FADE_IN, dur / 2);
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(1, t + fade);
+      }
       gain.gain.setValueAtTime(1, t + Math.max(0, dur - 0.03));
       gain.gain.linearRampToValueAtTime(0, t + dur); // tiny fade avoids a click at the cut
       const src = ctx.createBufferSource();
@@ -136,7 +142,6 @@ export default function Game() {
     setIdx(0);
     setLevel(0);
     setRevealed(false);
-    setWinner(null);
     setPhase('play');
     getCtx(); // create the audio context inside the click gesture
   };
@@ -145,11 +150,10 @@ export default function Game() {
     setRevealed(true);
   }, []);
 
-  const award = (i) => {
-    setPlayers((ps) => ps.map((p, n) => (n === i ? { ...p, score: p.score + POINTS[level] } : p)));
-    setWinner(i);
-    setRevealed(true);
-  };
+  // The scoreboard is just counters you control by hand; it never touches the game flow.
+  const setScore = (i, value) =>
+    setPlayers((ps) => ps.map((p, n) => (n === i ? { ...p, score: Number.isFinite(value) ? value : 0 } : p)));
+  const adjust = (i, delta) => setScore(i, players[i].score + delta);
 
   const next = () => {
     stop();
@@ -157,7 +161,6 @@ export default function Game() {
     setIdx(idx + 1);
     setLevel(0);
     setRevealed(false);
-    setWinner(null);
   };
 
   const longer = useCallback(() => {
@@ -170,7 +173,8 @@ export default function Game() {
   useEffect(() => {
     if (phase !== 'play') return;
     const onKey = (e) => {
-      if (['INPUT', 'TEXTAREA', 'BUTTON'].includes(e.target.tagName) && e.key === ' ') return;
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.target.tagName === 'BUTTON' && e.key === ' ') return;
       if (e.key === ' ') { e.preventDefault(); play(level); }
       else if (e.key === 'ArrowRight' && !revealed) longer();
       else if (e.key.toLowerCase() === 'r') reveal();
@@ -187,7 +191,7 @@ export default function Game() {
       <main className="wrap">
         <h1 className="title">Name That Tune</h1>
         <p className="sub">
-          Each song starts with a tiny clip. The longer the group waits, the fewer points it&apos;s worth.
+          Each song starts with a tiny clip and gets longer until someone knows it. You keep score by hand.
         </p>
         <div className="setup">
           {loadError && <p className="err">Couldn&apos;t load songs.json. Run the app with npm run dev.</p>}
@@ -299,50 +303,42 @@ export default function Game() {
           {status === 'error' && <p className="err">Couldn&apos;t load this file. Skip to the next song.</p>}
           <p className="hint">Space: play · Right arrow: longer · R: reveal · N: next</p>
 
-          <div className="panel" style={{ marginTop: 18 }}>
+          <div className="row">
             {!revealed ? (
-              <>
-                <h2>Who got it? Worth {POINTS[level]} pts</h2>
-                <div className="award">
-                  {players.map((p, i) => (
-                    <button key={p.name} className="btn" onClick={() => award(i)}>
-                      Give {POINTS[level]} pts to {p.name}
-                    </button>
-                  ))}
-                  <button className="btn ghost" onClick={reveal}>Nobody got it, reveal</button>
-                </div>
-              </>
+              <button className="btn alt" onClick={reveal}>Reveal answer</button>
             ) : (
               <>
-                <h2>Scores</h2>
-                <ul className="score">
-                  {players.map((p, i) => (
-                    <li key={p.name} className={i === winner ? 'won' : ''}>
-                      <span>{p.name}</span>
-                      <span className="pts">{p.score}</span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="row" style={{ marginTop: 14, marginBottom: 0 }}>
-                  <button className="btn" onClick={() => play(level, true)}>Play full song</button>
-                  <button className="btn main" onClick={next}>
-                    {idx + 1 >= queue.length ? 'Final scores' : 'Next song'}
-                  </button>
-                </div>
+                <button className="btn" onClick={() => play(level, true)}>{song.reveal > 0 ? 'Play from reveal point' : 'Play full song'}</button>
+                <button className="btn main" onClick={next}>
+                  {idx + 1 >= queue.length ? 'Final scores' : 'Next song'}
+                </button>
               </>
             )}
           </div>
 
-          {!revealed && (
-            <div className="panel" style={{ marginTop: 14 }}>
-              <h2>Scores</h2>
-              <ul className="score">
-                {players.map((p) => (
-                  <li key={p.name}><span>{p.name}</span><span className="pts">{p.score}</span></li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <div className="panel">
+            <h2>Scoreboard</h2>
+            <ul className="score">
+              {players.map((p, i) => (
+                <li key={p.name}>
+                  <span className="pname">{p.name}</span>
+                  <span className="adj">
+                    <button className="btn sm" onClick={() => adjust(i, -1)} aria-label={`Remove 1 point from ${p.name}`}>-1</button>
+                    <input
+                      type="number"
+                      className="pts-input"
+                      value={p.score}
+                      onChange={(e) => setScore(i, e.target.valueAsNumber)}
+                      aria-label={`${p.name} score`}
+                    />
+                    <button className="btn sm" onClick={() => adjust(i, 1)} aria-label={`Add 1 point to ${p.name}`}>+1</button>
+                    <button className="btn sm alt" onClick={() => adjust(i, 5)} aria-label={`Add 5 points to ${p.name}`}>+5</button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="hint">Type a number to set a score directly.</p>
+          </div>
         </div>
       </div>
     </main>
